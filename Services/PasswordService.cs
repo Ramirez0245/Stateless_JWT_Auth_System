@@ -9,6 +9,14 @@ namespace AuthApi.Services; // Places PasswordService in the AuthApi.Services na
 It must provide the methods required by that interface. */
 public class PasswordService : IPasswordService
 {
+    
+    public string DummyHash { get; }
+    // Constructor
+    public PasswordService()
+    {
+        DummyHash = Hash(Guid.NewGuid().ToString("N"));
+    }
+
     // OWASP guidance for PBKDF2-HMAC-SHA512 is 210,000+ iterations.
     /* field declaration with an initializer. It creates and 
     stores a PasswordHasher<User> object in _hasher. */
