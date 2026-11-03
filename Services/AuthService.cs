@@ -17,6 +17,7 @@ public class AuthService : IAuthService
     private readonly ITokenService _tokens;
     private readonly JwtOptions _jwt;
 
+    private const string InvalidTokenMessage = "Invalid or expired refresh token.";
     public AuthService(
         AppDbContext db,
         IPasswordService passwords,
@@ -89,29 +90,106 @@ public class AuthService : IAuthService
         if (verify == PasswordVerifyResult.SuccessRehashNeeded)
             user.PasswordHash = _passwords.Hash(request.Password);
 
+        var (response, refreshEntity) = BuildTokens(user, ipAddress);
+        _db.RefreshTokens.Add(refreshEntity);
+        await _db.SaveChangesAsync(ct);
+
+        return new(response);
+    }
+
+    // Builds an access token + a new (unsaved) refresh token entity
+    private (AuthResponse Response, RefreshToken Entity) BuildTokens(User user, string? ip)
+    {
         var access = _tokens.CreateAccessToken(user);
         var refresh = _tokens.GenerateRefreshToken();
         var refreshExpires = DateTime.UtcNow.AddDays(_jwt.RefreshTokenDays);
 
-        _db.RefreshTokens.Add(new RefreshToken
+        var entity = new RefreshToken
         {
             UserId = user.Id,
             TokenHash = refresh.Hash,
             ExpiresAtUtc = refreshExpires,
-            CreatedByIp = ipAddress
-        });
+            CreatedByIp = ip
+        };
 
-        await _db.SaveChangesAsync(ct);
-
-        return new(new AuthResponse
+        var response = new AuthResponse
         {
             AccessToken = access.Token,
             AccessTokenExpiresAtUtc = access.ExpiresAtUtc,
             RefreshToken = refresh.Raw,
             RefreshTokenExpiresAtUtc = refreshExpires
-        });
+        };
+
+        return (response, entity);
     }
 
+    public async Task<AuthResult<AuthResponse>> RefreshAsync(
+        string rawRefreshToken, string? ipAddress, CancellationToken ct)
+    {
+        var invalid = new AuthResult<AuthResponse>(null, AuthFailure.InvalidToken, InvalidTokenMessage);
+
+        var hash = _tokens.HashToken(rawRefreshToken);
+        var existing = await _db.RefreshTokens
+            .Include(t => t.User)
+            .SingleOrDefaultAsync(t => t.TokenHash == hash, ct);
+
+        if (existing is null)
+            return invalid;
+
+        if (existing.RevokedAtUtc is not null)
+        {
+            // A token that was already rotated is being replayed: assume compromise
+            if (existing.ReplacedByTokenHash is not null)
+                await RevokeAllForUserAsync(existing.UserId, ct);
+
+            return invalid;
+        }
+
+        if (existing.IsExpired)
+            return invalid;
+
+        var (response, newToken) = BuildTokens(existing.User, ipAddress);
+        var now = DateTime.UtcNow;
+
+        await using var tx = await _db.Database.BeginTransactionAsync(ct);
+
+        // Atomic "claim": only one concurrent request can revoke this token
+        var claimed = await _db.RefreshTokens
+            .Where(t => t.Id == existing.Id && t.RevokedAtUtc == null)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(t => t.RevokedAtUtc, now)
+                .SetProperty(t => t.ReplacedByTokenHash, newToken.TokenHash), ct);
+
+        if (claimed == 0)
+            return invalid; // lost a race with another refresh using the same token
+
+        _db.RefreshTokens.Add(newToken);
+        await _db.SaveChangesAsync(ct);
+        await tx.CommitAsync(ct);
+
+        return new(response);
+    }
+
+    public async Task LogoutAsync(string rawRefreshToken, CancellationToken ct)
+    {
+        var hash = _tokens.HashToken(rawRefreshToken);
+        var now = DateTime.UtcNow;
+
+        await _db.RefreshTokens
+            .Where(t => t.TokenHash == hash && t.RevokedAtUtc == null)
+            .ExecuteUpdateAsync(s => s.SetProperty(t => t.RevokedAtUtc, now), ct);
+    }
+
+    public Task LogoutAllAsync(Guid userId, CancellationToken ct) =>
+        RevokeAllForUserAsync(userId, ct);
+
+    private async Task RevokeAllForUserAsync(Guid userId, CancellationToken ct)
+    {
+        var now = DateTime.UtcNow;
+        await _db.RefreshTokens
+            .Where(t => t.UserId == userId && t.RevokedAtUtc == null)
+            .ExecuteUpdateAsync(s => s.SetProperty(t => t.RevokedAtUtc, now), ct);
+    }
     private static string NormalizeEmail(string email) =>
         email.Trim().ToLowerInvariant();
 }

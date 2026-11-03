@@ -2,7 +2,7 @@ using AuthApi.DTOs;
 
 namespace AuthApi.Services;
 
-public enum AuthFailure { None, InvalidInput, EmailTaken, InvalidCredentials }
+public enum AuthFailure { None, InvalidInput, EmailTaken, InvalidCredentials, InvalidToken }
 
 public record AuthResult<T>(T? Value, AuthFailure Failure = AuthFailure.None, string? Message = null)
 {
@@ -18,4 +18,7 @@ public interface IAuthService
     // the outer Task is parameterized with that result type.
     Task<AuthResult<RegisteredUser>> RegisterAsync(RegisterRequest request, CancellationToken ct);
     Task<AuthResult<AuthResponse>> LoginAsync(LoginRequest request, string? ipAddress, CancellationToken ct);
+    Task<AuthResult<AuthResponse>> RefreshAsync(string rawRefreshToken, string? ipAddress, CancellationToken ct);
+    Task LogoutAsync(string rawRefreshToken, CancellationToken ct);
+    Task LogoutAllAsync(Guid userId, CancellationToken ct);
 }

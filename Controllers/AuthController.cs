@@ -47,4 +47,36 @@ public class AuthController : ControllerBase
         email = User.FindFirst("email")?.Value,
         role = User.FindFirst("role")?.Value
     });
+
+    [HttpPost("refresh")]
+    [AllowAnonymous]
+    public async Task<IActionResult> Refresh(RefreshTokenRequest request, CancellationToken ct)
+    {
+        var ip = HttpContext.Connection.RemoteIpAddress?.ToString();
+        var result = await _auth.RefreshAsync(request.RefreshToken, ip, ct);
+
+        return result.Succeeded
+            ? Ok(result.Value)
+            : Unauthorized(new { error = result.Message });
+    }
+
+    // AllowAnonymous on purpose: the access token may already be expired
+    [HttpPost("logout")]
+    [AllowAnonymous]
+    public async Task<IActionResult> Logout(RefreshTokenRequest request, CancellationToken ct)
+    {
+        await _auth.LogoutAsync(request.RefreshToken, ct);
+        return NoContent();
+    }
+
+    [HttpPost("logout-all")]
+    [Authorize]
+    public async Task<IActionResult> LogoutAll(CancellationToken ct)
+    {
+        if (!Guid.TryParse(User.FindFirst("sub")?.Value, out var userId))
+            return Unauthorized();
+
+        await _auth.LogoutAllAsync(userId, ct);
+        return NoContent();
+    }    
 }
